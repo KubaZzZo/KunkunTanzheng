@@ -1,0 +1,67 @@
+services:
+  probe-server:
+    build:
+      context: .
+    environment:
+      PROBE_LISTEN_ADDRESS: :8080
+      PROBE_DATA_DIRECTORY: /var/lib/server-probe
+      PROBE_SECRETS_DIRECTORY: /var/lib/server-probe-secrets
+      PROBE_AGENT_CA_DIRECTORY: /var/lib/server-probe-agent-ca
+      PROBE_AGENT_CA_PUBLIC_DIRECTORY: /var/lib/server-probe-agent-ca-public
+      PROBE_BACKUP_DIRECTORY: /backups
+      PROBE_MONITOR_HOST: ${PROBE_MONITOR_HOST:?set PROBE_MONITOR_HOST}
+      PROBE_INGEST_HOST: ${PROBE_INGEST_HOST:?set PROBE_INGEST_HOST}
+      PROBE_ENROLL_HOST: ${PROBE_ENROLL_HOST:?set PROBE_ENROLL_HOST}
+    volumes:
+      - probe-data:/var/lib/server-probe
+      - probe-secrets:/var/lib/server-probe-secrets
+      - agent-ca-private:/var/lib/server-probe-agent-ca
+      - agent-ca-public:/var/lib/server-probe-agent-ca-public
+      - ${PROBE_BACKUP_HOST_DIRECTORY:?set PROBE_BACKUP_HOST_DIRECTORY}:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - private
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    depends_on:
+      probe-server:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until [ -s /srv/probe-ca/agent-ca.crt ]; do sleep 1; done
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    environment:
+      PROBE_MONITOR_HOST: ${PROBE_MONITOR_HOST:?set PROBE_MONITOR_HOST}
+      PROBE_INGEST_HOST: ${PROBE_INGEST_HOST:?set PROBE_INGEST_HOST}
+      PROBE_ENROLL_HOST: ${PROBE_ENROLL_HOST:?set PROBE_ENROLL_HOST}
+    ports:
+      - "443:443/tcp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - agent-ca-public:/srv/probe-ca:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - private
+    restart: unless-stopped
+
+volumes:
+  probe-data:
+  probe-secrets:
+  agent-ca-private:
+  agent-ca-public:
+  caddy-data:
+  caddy-config:
+
+networks:
+  private:
+    internal: true

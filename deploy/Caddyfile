@@ -1,0 +1,61 @@
+{
+  auto_https disable_redirects
+}
+
+{$PROBE_MONITOR_HOST} {
+  @monitor-read {
+    method GET
+    path / /login /setup /static/app.css /static/trend.js /nodes /nodes/*
+  }
+  @monitor-write {
+    method POST
+    path /login /logout /setup /nodes /nodes/*
+  }
+  handle @monitor-read {
+    reverse_proxy probe-server:8080 {
+      header_up -X-Forwarded-For
+      header_up X-Forwarded-For {remote_host}
+    }
+  }
+  handle @monitor-write {
+    reverse_proxy probe-server:8080 {
+      header_up -X-Forwarded-For
+      header_up X-Forwarded-For {remote_host}
+    }
+  }
+  respond "not found" 404
+}
+
+{$PROBE_ENROLL_HOST} {
+  @enroll {
+    method POST
+    path /v1/enroll
+  }
+  handle @enroll {
+    reverse_proxy probe-server:8080 {
+      header_up -X-Forwarded-For
+      header_up X-Forwarded-For {remote_host}
+    }
+  }
+  respond "not found" 404
+}
+
+{$PROBE_INGEST_HOST} {
+  tls {
+    client_auth {
+      mode require_and_verify
+      trust_pool file /srv/probe-ca/agent-ca.crt
+    }
+  }
+  @ingest {
+    method POST
+    path /v1/reports /v1/certificates/renew
+  }
+  handle @ingest {
+    reverse_proxy probe-server:8080 {
+      header_up -X-Probe-Client-Certificate
+      header_up X-Probe-Client-Certificate {http.request.tls.client.certificate_der_base64}
+    }
+  }
+  respond "not found" 404
+}

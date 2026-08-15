@@ -1,0 +1,36 @@
+[Unit]
+Description=Server Probe Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=probe-agent
+Group=probe-agent
+EnvironmentFile=/etc/probe-agent/probe-agent.env
+StateDirectory=probe-agent
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/probe-agent
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/proc
+ReadWritePaths=/var/lib/probe-agent
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
