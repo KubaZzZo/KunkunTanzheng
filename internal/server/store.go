@@ -140,9 +140,10 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) CreateNode(ctx context.Context, displayName string, createdAt time.Time) (Node, error) {
-	displayName = strings.TrimSpace(displayName)
-	if displayName == "" || len(displayName) > 128 {
-		return Node{}, fmt.Errorf("display name must be between 1 and 128 bytes")
+	var err error
+	displayName, err = normalizeDisplayName(displayName)
+	if err != nil {
+		return Node{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -168,6 +169,33 @@ func (s *Store) CreateNode(ctx context.Context, displayName string, createdAt ti
 		return Node{}, fmt.Errorf("commit create node: %w", err)
 	}
 	return Node{ID: id, DisplayName: displayName, CreatedAt: createdAt, State: probe.StatePending}, nil
+}
+
+func normalizeDisplayName(displayName string) (string, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" || len(displayName) > 128 {
+		return "", fmt.Errorf("display name must be between 1 and 128 bytes")
+	}
+	return displayName, nil
+}
+
+func (s *Store) RenameNode(ctx context.Context, nodeID, displayName string) error {
+	displayName, err := normalizeDisplayName(displayName)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, "UPDATE nodes SET display_name = ? WHERE id = ?", displayName, nodeID)
+	if err != nil {
+		return fmt.Errorf("rename node: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count renamed nodes: %w", err)
+	}
+	if changed == 0 {
+		return ErrNodeNotFound
+	}
+	return nil
 }
 
 func (s *Store) DisableNode(ctx context.Context, nodeID string) error {

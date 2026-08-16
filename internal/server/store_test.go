@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,50 @@ func TestStorePurgesSamplesOlderThanRetention(t *testing.T) {
 	}
 	if len(samples) != 1 || !samples[0].ReceivedAt.Equal(now) {
 		t.Fatalf("retained samples = %#v, want only current sample", samples)
+	}
+}
+
+func TestStoreRenamesNodeWithoutChangingMonitoringData(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	node, err := store.CreateNode(ctx, "web-01", now)
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	if err := store.RecordReport(ctx, probe.Report{NodeID: node.ID, CPUPercent: 12.5}, now); err != nil {
+		t.Fatalf("RecordReport() error = %v", err)
+	}
+
+	if err := store.RenameNode(ctx, node.ID, "  public-web-01  "); err != nil {
+		t.Fatalf("RenameNode() error = %v", err)
+	}
+	got, err := store.Node(ctx, node.ID, now)
+	if err != nil {
+		t.Fatalf("Node() error = %v", err)
+	}
+	if got.ID != node.ID || got.DisplayName != "public-web-01" || got.State != probe.StateOnline || got.LatestSample == nil || got.LatestSample.CPUPercent != 12.5 {
+		t.Fatalf("renamed node = %#v", got)
+	}
+}
+
+func TestStoreRejectsInvalidRenameWithoutChangingName(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	node, err := store.CreateNode(ctx, "web-01", now)
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+
+	for _, name := range []string{"   ", strings.Repeat("a", 129)} {
+		if err := store.RenameNode(ctx, node.ID, name); err == nil {
+			t.Fatalf("RenameNode(%q) error = nil", name)
+		}
+	}
+	got, err := store.Node(ctx, node.ID, now)
+	if err != nil || got.DisplayName != "web-01" {
+		t.Fatalf("Node() = %#v, %v", got, err)
 	}
 }
 
