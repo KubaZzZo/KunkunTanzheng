@@ -3,6 +3,7 @@ package server
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -32,6 +33,7 @@ type pageData struct {
 	StateFilter   string
 	AgentCommand  string
 	Error         string
+	DisplayName   string
 	TrafficIn24h  uint64
 	TrafficOut24h uint64
 }
@@ -172,6 +174,9 @@ func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request) {
 		err = h.store.DisableNode(r.Context(), nodeID)
 	case "remove":
 		err = h.store.RemoveNode(r.Context(), nodeID)
+	case "rename":
+		h.renameNode(w, r, nodeID)
+		return
 	default:
 		http.NotFound(w, r)
 		return
@@ -188,6 +193,27 @@ func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MonitorHandler) nodeDetail(w http.ResponseWriter, r *http.Request, nodeID string) {
+	h.renderNodeDetail(w, r, nodeID, http.StatusOK, "", "")
+}
+
+func (h *MonitorHandler) renameNode(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	displayName := r.Form.Get("display_name")
+	if err := h.store.RenameNode(r.Context(), nodeID, displayName); err != nil {
+		if errors.Is(err, ErrNodeNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		h.renderNodeDetail(w, r, nodeID, http.StatusBadRequest, displayName, err.Error())
+		return
+	}
+	http.Redirect(w, r, "/nodes/"+nodeID, http.StatusSeeOther)
+}
+
+func (h *MonitorHandler) renderNodeDetail(w http.ResponseWriter, r *http.Request, nodeID string, status int, displayName, message string) {
 	node, err := h.store.Node(r.Context(), nodeID, h.now().UTC())
 	if err != nil {
 		http.NotFound(w, r)
@@ -199,7 +225,10 @@ func (h *MonitorHandler) nodeDetail(w http.ResponseWriter, r *http.Request, node
 		return
 	}
 	trafficIn, trafficOut := trafficUsage(samples)
-	h.render(w, http.StatusOK, "node.html", pageData{Title: node.DisplayName, Node: node, TrendJSON: trendJSON(samples), TrafficIn24h: trafficIn, TrafficOut24h: trafficOut})
+	if displayName == "" && message == "" {
+		displayName = node.DisplayName
+	}
+	h.render(w, status, "node.html", pageData{Title: node.DisplayName, Node: node, TrendJSON: trendJSON(samples), Error: message, DisplayName: displayName, TrafficIn24h: trafficIn, TrafficOut24h: trafficOut})
 }
 
 func trafficUsage(samples []Sample) (uint64, uint64) {

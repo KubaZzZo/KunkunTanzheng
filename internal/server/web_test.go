@@ -104,6 +104,74 @@ func TestTrafficUsageIntegratesReportedRates(t *testing.T) {
 	}
 }
 
+func TestMonitorRenamesNodeFromDetailPage(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	node, err := store.CreateNode(ctx, "web-01", now)
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	monitor := newTestMonitor(t, store, now)
+
+	detail := httptest.NewRecorder()
+	monitor.ServeHTTP(detail, monitorRequest(http.MethodGet, "/nodes/"+node.ID, "", "monitor.example.test"))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `action="/nodes/`+node.ID+`/rename"`) || !strings.Contains(detail.Body.String(), `name="display_name"`) || !strings.Contains(detail.Body.String(), `value="web-01"`) {
+		t.Fatalf("detail page = %d/%q", detail.Code, detail.Body.String())
+	}
+
+	rename := httptest.NewRecorder()
+	monitor.ServeHTTP(rename, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/rename", url.Values{"display_name": {"edge-web-01"}}.Encode(), "monitor.example.test"))
+	if rename.Code != http.StatusSeeOther || rename.Header().Get("Location") != "/nodes/"+node.ID {
+		t.Fatalf("rename response = %d, location %q", rename.Code, rename.Header().Get("Location"))
+	}
+	got, err := store.Node(ctx, node.ID, now)
+	if err != nil || got.DisplayName != "edge-web-01" {
+		t.Fatalf("Node() = %#v, %v", got, err)
+	}
+}
+
+func TestMonitorRejectsInvalidNodeRename(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	store := openTestStore(t)
+	node, err := store.CreateNode(ctx, "web-01", now)
+	if err != nil {
+		t.Fatalf("CreateNode() error = %v", err)
+	}
+	monitor := newTestMonitor(t, store, now)
+
+	invalid := httptest.NewRecorder()
+	monitor.ServeHTTP(invalid, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/rename", url.Values{"display_name": {"   "}}.Encode(), "monitor.example.test"))
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "display name must be between 1 and 128 bytes") || !strings.Contains(invalid.Body.String(), `value="   "`) {
+		t.Fatalf("invalid rename response = %d/%q", invalid.Code, invalid.Body.String())
+	}
+	got, err := store.Node(ctx, node.ID, now)
+	if err != nil || got.DisplayName != "web-01" {
+		t.Fatalf("Node() = %#v, %v", got, err)
+	}
+
+	for _, request := range []*http.Request{
+		monitorRequest(http.MethodGet, "/nodes/"+node.ID+"/rename", "", "monitor.example.test"),
+		monitorRequest(http.MethodPost, "/nodes/missing/rename", "", "monitor.example.test"),
+	} {
+		response := httptest.NewRecorder()
+		monitor.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want 404", request.Method, request.URL.Path, response.Code)
+		}
+	}
+}
+
+func newTestMonitor(t *testing.T, store *Store, now time.Time) *MonitorHandler {
+	t.Helper()
+	ca, err := LoadOrCreateCertificateAuthority(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
+	}
+	return NewMonitorHandler(store, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
+}
+
 func monitorRequest(method, target, body, host string) *http.Request {
 	request := httptest.NewRequest(method, "https://"+host+target, strings.NewReader(body))
 	request.Host = host
