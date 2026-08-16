@@ -47,9 +47,12 @@ func (c EnrollmentClient) Enroll(ctx context.Context, code, certificatePath, key
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return fmt.Errorf("enrollment endpoint must be an HTTPS URL")
 	}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err := secureDirectory(filepath.Dir(keyPath)); err != nil {
+		return err
+	}
+	privateKey, err := loadOrCreatePrivateKey(keyPath)
 	if err != nil {
-		return fmt.Errorf("generate agent private key: %w", err)
+		return err
 	}
 	requestDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, privateKey)
 	if err != nil {
@@ -117,6 +120,34 @@ func (c EnrollmentClient) Enroll(ctx context.Context, code, certificatePath, key
 		return err
 	}
 	return nil
+}
+
+func loadOrCreatePrivateKey(path string) (*ecdsa.PrivateKey, error) {
+	if contents, err := os.ReadFile(path); err == nil {
+		block, _ := pem.Decode(contents)
+		if block == nil {
+			return nil, fmt.Errorf("parse existing agent private key PEM")
+		}
+		key, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse existing agent private key: %w", err)
+		}
+		return key, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read existing agent private key: %w", err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate agent private key: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("marshal agent private key: %w", err)
+	}
+	if err := writeCredential(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func verifyEnrollmentMaterial(certificatePEM, caPEM []byte, privateKey *ecdsa.PrivateKey) error {

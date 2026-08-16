@@ -16,29 +16,14 @@ func TestMonitorWorkflowCreatesFiltersDisablesAndRemovesNode(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
 	store := openTestStore(t)
-	auth, err := NewAuthService(store, strings.Repeat("m", 32), func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewAuthService() error = %v", err)
-	}
-	secret, err := GenerateTOTPSecret()
-	if err != nil {
-		t.Fatalf("GenerateTOTPSecret() error = %v", err)
-	}
-	if _, err := auth.Bootstrap(ctx, "password", secret, TOTPCode(secret, now)); err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
-	}
 	ca, err := LoadOrCreateCertificateAuthority(t.TempDir())
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
 	}
-	monitor := NewMonitorHandler(store, auth, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
-	session, err := auth.Authenticate(ctx, "password", TOTPCode(secret, now))
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
+	monitor := NewMonitorHandler(store, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
 
-	createForm := url.Values{"display_name": {"web-01"}, "csrf": {session.CSRFToken}}
-	create := monitorRequest(http.MethodPost, "/nodes", createForm.Encode(), session, "monitor.example.test")
+	createForm := url.Values{"display_name": {"web-01"}}
+	create := monitorRequest(http.MethodPost, "/nodes", createForm.Encode(), "monitor.example.test")
 	created := httptest.NewRecorder()
 	monitor.ServeHTTP(created, create)
 	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), "PROBE_ENROLL_CODE") {
@@ -51,24 +36,24 @@ func TestMonitorWorkflowCreatesFiltersDisablesAndRemovesNode(t *testing.T) {
 	node := nodes[0]
 
 	dashboard := httptest.NewRecorder()
-	monitor.ServeHTTP(dashboard, monitorRequest(http.MethodGet, "/?q=web&state=pending", "", session, "monitor.example.test"))
+	monitor.ServeHTTP(dashboard, monitorRequest(http.MethodGet, "/?q=web&state=pending", "", "monitor.example.test"))
 	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), "web-01") || strings.Contains(dashboard.Body.String(), "PROBE_ENROLL_CODE") {
 		t.Fatalf("dashboard status/body = %d/%q", dashboard.Code, dashboard.Body.String())
 	}
 
 	disable := httptest.NewRecorder()
-	monitor.ServeHTTP(disable, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/disable", "csrf="+url.QueryEscape(session.CSRFToken), session, "monitor.example.test"))
+	monitor.ServeHTTP(disable, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/disable", "", "monitor.example.test"))
 	if disable.Code != http.StatusSeeOther {
 		t.Fatalf("disable status = %d, want 303", disable.Code)
 	}
 	detail := httptest.NewRecorder()
-	monitor.ServeHTTP(detail, monitorRequest(http.MethodGet, "/nodes/"+node.ID, "", session, "monitor.example.test"))
+	monitor.ServeHTTP(detail, monitorRequest(http.MethodGet, "/nodes/"+node.ID, "", "monitor.example.test"))
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "offline") {
 		t.Fatalf("detail status/body = %d/%q", detail.Code, detail.Body.String())
 	}
 
 	remove := httptest.NewRecorder()
-	monitor.ServeHTTP(remove, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/remove", "csrf="+url.QueryEscape(session.CSRFToken), session, "monitor.example.test"))
+	monitor.ServeHTTP(remove, monitorRequest(http.MethodPost, "/nodes/"+node.ID+"/remove", "", "monitor.example.test"))
 	if remove.Code != http.StatusSeeOther {
 		t.Fatalf("remove status = %d, want 303", remove.Code)
 	}
@@ -81,17 +66,6 @@ func TestNodeDetailRenders24HourTrendChart(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	store := openTestStore(t)
-	auth, err := NewAuthService(store, strings.Repeat("t", 32), func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewAuthService() error = %v", err)
-	}
-	secret, err := GenerateTOTPSecret()
-	if err != nil {
-		t.Fatalf("GenerateTOTPSecret() error = %v", err)
-	}
-	if _, err := auth.Bootstrap(ctx, "password", secret, TOTPCode(secret, now)); err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
-	}
 	node, err := store.CreateNode(ctx, "chart-01", now)
 	if err != nil {
 		t.Fatalf("CreateNode() error = %v", err)
@@ -103,14 +77,10 @@ func TestNodeDetailRenders24HourTrendChart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
 	}
-	monitor := NewMonitorHandler(store, auth, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
-	session, err := auth.Authenticate(ctx, "password", TOTPCode(secret, now))
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
+	monitor := NewMonitorHandler(store, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
 
 	detail := httptest.NewRecorder()
-	monitor.ServeHTTP(detail, monitorRequest(http.MethodGet, "/nodes/"+node.ID, "", session, "monitor.example.test"))
+	monitor.ServeHTTP(detail, monitorRequest(http.MethodGet, "/nodes/"+node.ID, "", "monitor.example.test"))
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `id="trend-chart"`) || !strings.Contains(detail.Body.String(), `data-trend=`) {
 		t.Fatalf("detail status/body = %d/%q", detail.Code, detail.Body.String())
 	}
@@ -122,13 +92,23 @@ func TestNodeDetailRenders24HourTrendChart(t *testing.T) {
 	}
 }
 
-func monitorRequest(method, target, body string, session Session, host string) *http.Request {
+func TestTrafficUsageIntegratesReportedRates(t *testing.T) {
+	start := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	inbound, outbound := trafficUsage([]Sample{
+		{ReceivedAt: start},
+		{ReceivedAt: start.Add(30 * time.Second), IngressBytesPerSecond: 10, EgressBytesPerSecond: 4},
+		{ReceivedAt: start.Add(60 * time.Second), IngressBytesPerSecond: 20, EgressBytesPerSecond: 8},
+	})
+	if inbound != 900 || outbound != 360 {
+		t.Fatalf("trafficUsage() = %d/%d, want 900/360", inbound, outbound)
+	}
+}
+
+func monitorRequest(method, target, body, host string) *http.Request {
 	request := httptest.NewRequest(method, "https://"+host+target, strings.NewReader(body))
 	request.Host = host
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: session.Token})
 	if method == http.MethodPost {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		request.Header.Set("Origin", "https://"+host)
 	}
 	return request
 }

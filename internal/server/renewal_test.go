@@ -5,13 +5,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCertificateRenewalRequiresActiveClientCertificate(t *testing.T) {
 	fixture := newIngestFixture(t)
+	renewalNow := fixture.certificate.NotAfter.Add(-6 * 24 * time.Hour)
+	fixture.ingest.Now = func() time.Time { return renewalNow }
 	handler := CertificateRenewalHandler{Ingest: fixture.ingest, CA: fixture.ingest.CA}
 	payload, err := json.Marshal(map[string]string{"csr_pem": string(newTestCSR(t))})
 	if err != nil {
@@ -32,6 +36,9 @@ func TestCertificateRenewalRequiresActiveClientCertificate(t *testing.T) {
 	if certificate.SerialNumber.Cmp(fixture.certificate.SerialNumber) == 0 {
 		t.Fatal("renewal reused existing certificate serial")
 	}
+	if _, err := fixture.store.NodeForCertificate(request.Context(), fixture.certificate.SerialNumber.Text(16), fixture.now); !errors.Is(err, ErrCertificateRevoked) {
+		t.Fatalf("previous certificate status = %v, want ErrCertificateRevoked", err)
+	}
 
 	if err := fixture.store.DisableNode(request.Context(), fixture.node.ID); err != nil {
 		t.Fatalf("DisableNode() error = %v", err)
@@ -40,5 +47,37 @@ func TestCertificateRenewalRequiresActiveClientCertificate(t *testing.T) {
 	handler.HandleRenew(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked renewal status = %d, want 401", response.Code)
+	}
+}
+
+func TestCertificateRenewalAcceptsCaddyCertificateSerialQuery(t *testing.T) {
+	fixture := newIngestFixture(t)
+	fixture.ingest.Now = func() time.Time { return fixture.certificate.NotAfter.Add(-6 * 24 * time.Hour) }
+	handler := CertificateRenewalHandler{Ingest: fixture.ingest, CA: fixture.ingest.CA}
+	payload, err := json.Marshal(map[string]string{"csr_pem": string(newTestCSR(t))})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/certificates/renew?"+clientCertificateSerialQuery+"="+fixture.certificate.SerialNumber.Text(16), bytes.NewReader(payload))
+	response := httptest.NewRecorder()
+	handler.HandleRenew(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("renewal status = %d, want 201; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCertificateRenewalRejectsRequestsOutsideRenewalWindow(t *testing.T) {
+	fixture := newIngestFixture(t)
+	handler := CertificateRenewalHandler{Ingest: fixture.ingest, CA: fixture.ingest.CA}
+	payload, err := json.Marshal(map[string]string{"csr_pem": string(newTestCSR(t))})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/certificates/renew", bytes.NewReader(payload))
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{fixture.certificate}}
+	response := httptest.NewRecorder()
+	handler.HandleRenew(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("early renewal status = %d, want 401", response.Code)
 	}
 }

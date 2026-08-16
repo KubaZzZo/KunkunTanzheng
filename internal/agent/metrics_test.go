@@ -58,6 +58,9 @@ func TestParseNetDevAndCounterRate(t *testing.T) {
 		" face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed",
 		"  lo: 100 1 0 0 0 0 0 0 200 1 0 0 0 0 0 0 0",
 		"eth0: 300 1 0 0 0 0 0 0 500 1 0 0 0 0 0 0 0",
+		"docker0: 700 1 0 0 0 0 0 0 900 1 0 0 0 0 0 0 0",
+		"veth1234: 1100 1 0 0 0 0 0 0 1300 1 0 0 0 0 0 0 0",
+		"br-abcdef: 1500 1 0 0 0 0 0 0 1700 1 0 0 0 0 0 0 0",
 	}, "\n")
 	counters, err := ParseNetDev([]byte(content))
 	if err != nil {

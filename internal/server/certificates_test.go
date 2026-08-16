@@ -47,8 +47,12 @@ func TestEnrollmentIssuesOneTimeNodeCertificate(t *testing.T) {
 	if len(issued.CAPEM) == 0 {
 		t.Fatal("Enroll() did not return CA certificate")
 	}
-	if _, err := service.Enroll(ctx, code, csr); !errors.Is(err, ErrEnrollmentCodeUsed) {
-		t.Fatalf("second Enroll() error = %v, want ErrEnrollmentCodeUsed", err)
+	replayed, err := service.Enroll(ctx, code, csr)
+	if err != nil {
+		t.Fatalf("replayed Enroll() error = %v", err)
+	}
+	if string(replayed.CertificatePEM) != string(issued.CertificatePEM) {
+		t.Fatal("replayed enrollment returned a different certificate")
 	}
 
 	nodeID, err := store.NodeForCertificate(ctx, certificate.SerialNumber.Text(16), now)

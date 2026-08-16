@@ -177,7 +177,7 @@ func ParseNetDev(content []byte) (NetCounters, error) {
 			continue
 		}
 		name := strings.TrimSpace(line[:colon])
-		if name == "" || name == "lo" {
+		if name == "" || name == "lo" || isVirtualInterface(name) {
 			continue
 		}
 		fields := strings.Fields(line[colon+1:])
@@ -200,6 +200,15 @@ func ParseNetDev(content []byte) (NetCounters, error) {
 		return NetCounters{}, fmt.Errorf("no network interface counters found")
 	}
 	return counters, nil
+}
+
+func isVirtualInterface(name string) bool {
+	for _, prefix := range []string{"docker", "veth", "br-", "virbr", "cni", "flannel", "tun", "tap", "wg", "tailscale"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func CounterRate(previous, current uint64, elapsed time.Duration) float64 {

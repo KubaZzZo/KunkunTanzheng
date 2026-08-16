@@ -28,6 +28,20 @@ func TestIngestAcceptsValidCertificateReport(t *testing.T) {
 	}
 }
 
+func TestIngestAcceptsCaddyCertificateSerialQuery(t *testing.T) {
+	fixture := newIngestFixture(t)
+	payload, err := json.Marshal(probe.Report{NodeID: fixture.node.ID, CPUPercent: 12})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/reports?"+clientCertificateSerialQuery+"="+fixture.certificate.SerialNumber.Text(16), bytes.NewReader(payload))
+	response := httptest.NewRecorder()
+	fixture.ingest.HandleReport(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("report status = %d, want 204; body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestIngestRejectsMissingOrMismatchedCertificate(t *testing.T) {
 	fixture := newIngestFixture(t)
 	payload, err := json.Marshal(probe.Report{NodeID: fixture.node.ID})
@@ -86,6 +100,23 @@ func TestIngestLimitsEachNodeToFourReportsPerMinute(t *testing.T) {
 	}
 	if response.Header().Get("Retry-After") == "" {
 		t.Fatal("429 response has no Retry-After header")
+	}
+}
+
+func TestSlidingWindowLimiterRemovesExpiredKeys(t *testing.T) {
+	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	limiter := NewSlidingWindowLimiter(2, time.Minute, func() time.Time { return now })
+	if allowed, _ := limiter.Allow("stale"); !allowed {
+		t.Fatal("first event was unexpectedly limited")
+	}
+	now = now.Add(2 * time.Minute)
+	if allowed, _ := limiter.Allow("fresh"); !allowed {
+		t.Fatal("fresh event was unexpectedly limited")
+	}
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if _, ok := limiter.events["stale"]; ok {
+		t.Fatal("expired limiter key was retained")
 	}
 }
 

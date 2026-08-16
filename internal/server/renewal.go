@@ -23,12 +23,7 @@ func (h CertificateRenewalHandler) HandleRenew(w http.ResponseWriter, r *http.Re
 		return
 	}
 	now := h.Ingest.now()
-	nodeID, err := h.Ingest.nodeForRequest(r, now)
-	if err != nil {
-		unauthorized(w)
-		return
-	}
-	certificate, _, err := requestClientCertificate(r)
+	nodeID, serialNumber, err := h.Ingest.clientIdentity(r, now)
 	if err != nil {
 		unauthorized(w)
 		return
@@ -55,8 +50,8 @@ func (h CertificateRenewalHandler) HandleRenew(w http.ResponseWriter, r *http.Re
 		http.Error(w, "invalid renewal request", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Ingest.Store.RenewCertificate(r.Context(), certificate.SerialNumber.Text(16), issued.SerialNumber, now, issued.NotAfter); err != nil {
-		if errors.Is(err, ErrCertificateUnknown) || errors.Is(err, ErrCertificateRevoked) || errors.Is(err, ErrCertificateExpired) {
+	if _, err := h.Ingest.Store.RenewCertificate(r.Context(), serialNumber, issued.SerialNumber, now, issued.NotAfter); err != nil {
+		if errors.Is(err, ErrCertificateUnknown) || errors.Is(err, ErrCertificateRevoked) || errors.Is(err, ErrCertificateExpired) || errors.Is(err, ErrCertificateRenewalNotDue) {
 			unauthorized(w)
 			return
 		}

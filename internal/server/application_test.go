@@ -1,11 +1,8 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
 	"time"
 )
@@ -13,20 +10,12 @@ import (
 func TestApplicationFailsClosedForUnknownHostAndRoutes(t *testing.T) {
 	now := time.Now().UTC()
 	store := openTestStore(t)
-	auth, err := NewAuthService(store, strings.Repeat("r", 32), func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewAuthService() error = %v", err)
-	}
 	ca, err := LoadOrCreateCertificateAuthority(t.TempDir())
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
 	}
-	monitor := NewMonitorHandler(store, auth, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
-	setup, err := NewSetupManager(auth, func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewSetupManager() error = %v", err)
-	}
-	app := NewApplication(ApplicationConfig{MonitorHost: "monitor.example.test", IngestHost: "ingest.example.test", EnrollHost: "enroll.example.test"}, monitor, IngestService{Store: store, CA: ca, Now: func() time.Time { return now }}, EnrollmentHandler{Service: EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}}, CertificateRenewalHandler{Ingest: IngestService{Store: store, CA: ca, Now: func() time.Time { return now }}, CA: ca}, setup)
+	monitor := NewMonitorHandler(store, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
+	app := NewApplication(ApplicationConfig{MonitorHost: "monitor.example.test", IngestHost: "ingest.example.test", EnrollHost: "enroll.example.test"}, monitor, IngestService{Store: store, CA: ca, Now: func() time.Time { return now }}, EnrollmentHandler{Service: EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}}, CertificateRenewalHandler{Ingest: IngestService{Store: store, CA: ca, Now: func() time.Time { return now }}, CA: ca})
 
 	unknown := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "https://unknown.example.test/", nil)
@@ -52,56 +41,21 @@ func TestApplicationFailsClosedForUnknownHostAndRoutes(t *testing.T) {
 		t.Fatalf("ingest missing certificate status = %d, want 401", ingest.Code)
 	}
 
-	_ = context.Background()
-}
-
-func TestApplicationCompletesOneTimeSetupOverHTTP(t *testing.T) {
-	now := time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
-	store := openTestStore(t)
-	auth, err := NewAuthService(store, strings.Repeat("s", 32), func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewAuthService() error = %v", err)
-	}
-	ca, err := LoadOrCreateCertificateAuthority(t.TempDir())
-	if err != nil {
-		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
-	}
-	monitor := NewMonitorHandler(store, auth, EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
-	setup, err := NewSetupManager(auth, func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewSetupManager() error = %v", err)
-	}
-	token, secret, pending := setup.Pending()
-	if !pending {
-		t.Fatal("setup token is not pending")
-	}
-	app := NewApplication(ApplicationConfig{MonitorHost: "monitor.example.test", IngestHost: "ingest.example.test", EnrollHost: "enroll.example.test"}, monitor, IngestService{}, EnrollmentHandler{}, CertificateRenewalHandler{}, setup)
-
-	get := httptest.NewRequest(http.MethodGet, "https://monitor.example.test/setup?token="+url.QueryEscape(token), nil)
-	get.Host = "monitor.example.test"
-	getResponse := httptest.NewRecorder()
-	app.ServeHTTP(getResponse, get)
-	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), "Set up Server Probe") {
-		t.Fatalf("setup GET status/body = %d/%q", getResponse.Code, getResponse.Body.String())
+	publicMonitor := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "https://monitor.example.test/", nil)
+	request.Host = "monitor.example.test"
+	app.ServeHTTP(publicMonitor, request)
+	if publicMonitor.Code != http.StatusOK {
+		t.Fatalf("public monitor status = %d, want 200", publicMonitor.Code)
 	}
 
-	form := url.Values{"token": {token}, "password": {"password"}, "totp": {TOTPCode(secret, now)}}
-	post := httptest.NewRequest(http.MethodPost, "https://monitor.example.test/setup", strings.NewReader(form.Encode()))
-	post.Host = "monitor.example.test"
-	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	post.Header.Set("Origin", "https://monitor.example.test")
-	postResponse := httptest.NewRecorder()
-	app.ServeHTTP(postResponse, post)
-	if postResponse.Code != http.StatusCreated || !strings.Contains(postResponse.Body.String(), "Recovery codes") {
-		t.Fatalf("setup POST status/body = %d/%q", postResponse.Code, postResponse.Body.String())
-	}
-	if _, err := auth.Authenticate(context.Background(), "password", TOTPCode(secret, now)); err != nil {
-		t.Fatalf("Authenticate() after setup error = %v", err)
-	}
-
-	used := httptest.NewRecorder()
-	app.ServeHTTP(used, get)
-	if used.Code != http.StatusNotFound {
-		t.Fatalf("used setup token status = %d, want 404", used.Code)
+	for _, path := range []string{"/login", "/setup"} {
+		response := httptest.NewRecorder()
+		request = httptest.NewRequest(http.MethodGet, "https://monitor.example.test"+path, nil)
+		request.Host = "monitor.example.test"
+		app.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("removed auth route %s status = %d, want 404", path, response.Code)
+		}
 	}
 }

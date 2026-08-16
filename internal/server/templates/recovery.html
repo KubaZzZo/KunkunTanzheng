@@ -1,2 +1,0 @@
-{{define "recovery.html"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{.Title}}</title><link rel="stylesheet" href="/static/app.css"></head><body class="auth"><main class="auth-panel"><h1>Recovery codes</h1><p>Store these codes securely. They will not be shown again.</p><pre><code>{{range .RecoveryCodes}}{{.}}
-{{end}}</code></pre><p><a href="/login">Continue to sign in</a></p></main></body></html>{{end}}

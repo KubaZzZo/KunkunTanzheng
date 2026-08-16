@@ -1,6 +1,6 @@
 # Server Probe
 
-Server Probe is a self-hosted monitoring MVP for up to 50 Linux servers. Each Agent sends outbound HTTPS reports every 30 seconds; the central service stores raw samples in SQLite and exposes a single-administrator monitoring UI.
+Server Probe is a self-hosted monitoring MVP for up to 50 Linux servers. Each Agent sends outbound HTTPS reports every 30 seconds; the central service stores raw samples in SQLite and exposes a monitoring UI.
 
 The public surface is deliberately limited: only Caddy publishes TCP 443. The Probe Server and SQLite database are private to the Compose network. There are no remote commands, inbound Agent listeners, public status pages, or multi-user accounts.
 
@@ -28,9 +28,11 @@ Use `GOARCH=arm64` for ARM64 hosts.
 
 Create DNS `A` or `AAAA` records for three distinct names, all pointing at the Compose host:
 
-- `monitor.example.com`
-- `ingest.example.com`
-- `enroll.example.com`
+- `monitor.tanzhen.zhuoruan.xyz`
+- `ingest.tanzhen.zhuoruan.xyz`
+- `enroll.tanzhen.zhuoruan.xyz`
+
+Create three Cloudflare DNS records pointing to the Compose host. The monitor URL is `https://monitor.tanzhen.zhuoruan.xyz`; `tanzhen.zhuoruan.xyz` can remain the zone apex or redirect target. Keep the three service hostnames distinct because the ingest hostname requires Agent mTLS while enrollment is intentionally public.
 
 Allow only inbound TCP 443 at the host firewall. Do not publish port 8080 or the database volume. Prepare a private host backup directory owned by the non-root container UID:
 
@@ -41,9 +43,9 @@ sudo install -d -m 0700 -o 65532 -g 65532 /srv/server-probe/backups
 Create `.env` next to `docker-compose.yml`:
 
 ```dotenv
-PROBE_MONITOR_HOST=monitor.example.com
-PROBE_INGEST_HOST=ingest.example.com
-PROBE_ENROLL_HOST=enroll.example.com
+PROBE_MONITOR_HOST=monitor.tanzhen.zhuoruan.xyz
+PROBE_INGEST_HOST=ingest.tanzhen.zhuoruan.xyz
+PROBE_ENROLL_HOST=enroll.tanzhen.zhuoruan.xyz
 PROBE_BACKUP_HOST_DIRECTORY=/srv/server-probe/backups
 ```
 
@@ -54,9 +56,9 @@ docker compose up -d --build
 docker compose logs -f probe-server
 ```
 
-On the first start, `probe-server` prints a one-time setup URL in its local logs. Open it, choose the administrator password, bind a TOTP authenticator, and store the ten displayed recovery codes offline. The URL stops working immediately after successful setup.
+Fresh `probe-data`, `agent-ca-private`, and `agent-ca-public` named volumes are initialized from image directories owned by UID/GID `65532`. SQLite and the Agent CA private key are isolated in the first two volumes; only the public CA certificate is copied into `agent-ca-public` for Caddy. Caddy waits for that certificate before starting its mTLS listener.
 
-Fresh `probe-data`, `probe-secrets`, `agent-ca-private`, and `agent-ca-public` named volumes are initialized from image directories owned by UID/GID `65532`. SQLite, the application key, and the Agent CA private key are isolated in the first three volumes; only the public CA certificate is copied into `agent-ca-public` for Caddy. Caddy waits for that certificate before starting its mTLS listener.
+The monitor UI has no built-in login. Restrict `monitor.tanzhen.zhuoruan.xyz` with Cloudflare Access, an IP allowlist, or a private network before exposing it publicly; node creation, disablement, and removal are otherwise unauthenticated.
 
 ## Enroll an Agent
 
@@ -66,8 +68,8 @@ For systemd deployment, install the binary at `/usr/local/bin/probe-agent`, copy
 
 ```dotenv
 PROBE_NODE_ID=node-id-from-the-ui
-PROBE_ENDPOINT=https://ingest.example.com/v1/reports
-PROBE_ENROLL_ENDPOINT=https://enroll.example.com/v1/enroll
+PROBE_ENDPOINT=https://ingest.tanzhen.zhuoruan.xyz/v1/reports
+PROBE_ENROLL_ENDPOINT=https://enroll.tanzhen.zhuoruan.xyz/v1/enroll
 PROBE_ENROLL_CODE=one-time-code-from-the-ui
 ```
 

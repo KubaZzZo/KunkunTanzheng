@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -22,15 +23,17 @@ import (
 const MaxNodes = 50
 
 var (
-	ErrNodeNotFound          = errors.New("node not found")
-	ErrNodeDisabled          = errors.New("node is disabled")
-	ErrNodeLimit             = errors.New("node limit reached")
-	ErrEnrollmentCodeInvalid = errors.New("enrollment code is invalid")
-	ErrEnrollmentCodeUsed    = errors.New("enrollment code was already used")
-	ErrEnrollmentCodeExpired = errors.New("enrollment code has expired")
-	ErrCertificateUnknown    = errors.New("certificate is unknown")
-	ErrCertificateRevoked    = errors.New("certificate is revoked")
-	ErrCertificateExpired    = errors.New("certificate has expired")
+	ErrNodeNotFound             = errors.New("node not found")
+	ErrNodeDisabled             = errors.New("node is disabled")
+	ErrNodeLimit                = errors.New("node limit reached")
+	ErrEnrollmentCodeInvalid    = errors.New("enrollment code is invalid")
+	ErrEnrollmentCodeUsed       = errors.New("enrollment code was already used")
+	ErrEnrollmentCodeExpired    = errors.New("enrollment code has expired")
+	ErrCertificateUnknown       = errors.New("certificate is unknown")
+	ErrCertificateRevoked       = errors.New("certificate is revoked")
+	ErrCertificateExpired       = errors.New("certificate has expired")
+	ErrCertificateRenewalNotDue = errors.New("certificate renewal is not due")
+	ErrEnrollmentReplayNotFound = errors.New("enrollment replay not found")
 )
 
 type Store struct {
@@ -103,6 +106,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS enrollment_codes (
             code_hash BLOB PRIMARY KEY, node_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL,
             used_at INTEGER, FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+        )`,
+		`CREATE TABLE IF NOT EXISTS enrollment_results (
+            code_hash BLOB PRIMARY KEY, node_id TEXT NOT NULL, serial_number TEXT NOT NULL,
+            certificate_pem BLOB NOT NULL, public_key_der BLOB NOT NULL, expires_at INTEGER NOT NULL,
+            FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
         )`,
 		`CREATE TABLE IF NOT EXISTS agent_certificates (
             serial_number TEXT PRIMARY KEY, node_id TEXT NOT NULL, issued_at INTEGER NOT NULL,
@@ -218,7 +226,7 @@ func (s *Store) CreateEnrollmentCode(ctx context.Context, nodeID, code string, e
 	return nil
 }
 
-func (s *Store) EnrollCertificate(ctx context.Context, code, serialNumber string, issuedAt, expiresAt time.Time) (string, error) {
+func (s *Store) EnrollCertificate(ctx context.Context, code, serialNumber string, certificatePEM, publicKeyDER []byte, issuedAt, expiresAt time.Time) (string, error) {
 	codeHash := sha256.Sum256([]byte(code))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -253,6 +261,10 @@ func (s *Store) EnrollCertificate(ctx context.Context, code, serialNumber string
         VALUES (?, ?, ?, ?)`, serialNumber, nodeID, issuedAt.UnixMilli(), expiresAt.UTC().UnixMilli()); err != nil {
 		return "", fmt.Errorf("insert agent certificate: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_results(code_hash, node_id, serial_number, certificate_pem, public_key_der, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)`, codeHash[:], nodeID, serialNumber, certificatePEM, publicKeyDER, expiresAt.UTC().UnixMilli()); err != nil {
+		return "", fmt.Errorf("store enrollment result: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, "UPDATE enrollment_codes SET used_at = ? WHERE code_hash = ?", issuedAt.UnixMilli(), codeHash[:]); err != nil {
 		return "", fmt.Errorf("consume enrollment code: %w", err)
 	}
@@ -260,6 +272,34 @@ func (s *Store) EnrollCertificate(ctx context.Context, code, serialNumber string
 		return "", fmt.Errorf("commit enrollment certificate: %w", err)
 	}
 	return nodeID, nil
+}
+
+type EnrollmentReplay struct {
+	NodeID         string
+	SerialNumber   string
+	CertificatePEM []byte
+	PublicKeyDER   []byte
+	ExpiresAt      time.Time
+}
+
+func (s *Store) EnrollmentReplay(ctx context.Context, code string, publicKeyDER []byte) (EnrollmentReplay, error) {
+	codeHash := sha256.Sum256([]byte(code))
+	var replay EnrollmentReplay
+	var expiresAt int64
+	err := s.db.QueryRowContext(ctx, `SELECT node_id, serial_number, certificate_pem, public_key_der, expires_at
+        FROM enrollment_results WHERE code_hash = ?`, codeHash[:]).Scan(
+		&replay.NodeID, &replay.SerialNumber, &replay.CertificatePEM, &replay.PublicKeyDER, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EnrollmentReplay{}, ErrEnrollmentReplayNotFound
+	}
+	if err != nil {
+		return EnrollmentReplay{}, fmt.Errorf("read enrollment replay: %w", err)
+	}
+	if !bytes.Equal(replay.PublicKeyDER, publicKeyDER) {
+		return EnrollmentReplay{}, ErrEnrollmentCodeUsed
+	}
+	replay.ExpiresAt = time.UnixMilli(expiresAt).UTC()
+	return replay, nil
 }
 
 func (s *Store) NodeForCertificate(ctx context.Context, serialNumber string, at time.Time) (string, error) {
@@ -311,9 +351,15 @@ func (s *Store) RenewCertificate(ctx context.Context, currentSerial, newSerial s
 	if issuedAt.UnixMilli() >= expiration {
 		return "", ErrCertificateExpired
 	}
+	if issuedAt.Before(time.UnixMilli(expiration).UTC().Add(-7 * 24 * time.Hour)) {
+		return "", ErrCertificateRenewalNotDue
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_certificates(serial_number, node_id, issued_at, expires_at)
         VALUES (?, ?, ?, ?)`, newSerial, nodeID, issuedAt.UnixMilli(), expiresAt.UTC().UnixMilli()); err != nil {
 		return "", fmt.Errorf("insert renewed certificate: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE agent_certificates SET revoked_at = ? WHERE serial_number = ? AND revoked_at IS NULL", issuedAt.UnixMilli(), currentSerial); err != nil {
+		return "", fmt.Errorf("revoke previous certificate: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit certificate renewal: %w", err)

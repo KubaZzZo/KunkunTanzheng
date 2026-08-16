@@ -12,11 +12,11 @@
   }
 
   function seriesFor(metric, points) {
-    if (metric === "memory") return [{ name: "Memory", color: "#087e8b", values: points.map(function (point) { return point.memory; }) }];
-    if (metric === "disk") return [{ name: "Root disk", color: "#bb2d3b", values: points.map(function (point) { return point.disk; }) }];
+    if (metric === "memory") return [{ name: "内存", color: "#087e8b", values: points.map(function (point) { return point.memory; }) }];
+    if (metric === "disk") return [{ name: "根目录磁盘", color: "#bb2d3b", values: points.map(function (point) { return point.disk; }) }];
     if (metric === "network") return [
-      { name: "Ingress", color: "#087e8b", values: points.map(function (point) { return point.ingress; }) },
-      { name: "Egress", color: "#9467bd", values: points.map(function (point) { return point.egress; }) }
+      { name: "入站", color: "#087e8b", values: points.map(function (point) { return point.ingress; }) },
+      { name: "出站", color: "#9467bd", values: points.map(function (point) { return point.egress; }) }
     ];
     return [{ name: "CPU", color: "#e07000", values: points.map(function (point) { return point.cpu; }) }];
   }
@@ -42,7 +42,8 @@
     var series = seriesFor(metric, points);
     var maximum = Math.max.apply(null, series.reduce(function (all, item) { return all.concat(item.values); }, [0]));
     maximum = Math.max(maximum, metric === "cpu" ? 100 : 1);
-    var svg = element("svg", { viewBox: "0 0 " + width + " " + height, role: "img", "aria-label": "24 hour " + metric + " trend" });
+    var labels = { cpu: "CPU", memory: "内存", disk: "根目录磁盘", network: "网络" };
+    var svg = element("svg", { viewBox: "0 0 " + width + " " + height, role: "img", "aria-label": "最近 24 小时" + labels[metric] + "趋势" });
     for (var grid = 0; grid <= 4; grid += 1) {
       var y = top + (plotHeight * grid / 4);
       svg.appendChild(element("line", { x1: left, y1: y, x2: width - right, y2: y, class: "trend-grid" }));

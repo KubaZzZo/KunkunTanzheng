@@ -15,18 +15,15 @@ var webAssets embed.FS
 
 type MonitorHandler struct {
 	store              *Store
-	guard              RequestGuard
 	enrollment         EnrollmentService
 	reportEndpoint     string
 	enrollmentEndpoint string
 	now                func() time.Time
 	templates          *template.Template
-	login              LoginHandler
 }
 
 type pageData struct {
 	Title         string
-	CSRFToken     string
 	Nodes         []Node
 	Node          Node
 	Samples       []Sample
@@ -35,30 +32,52 @@ type pageData struct {
 	StateFilter   string
 	AgentCommand  string
 	Error         string
-	SetupToken    string
-	TOTPSecret    string
-	RecoveryCodes []string
+	TrafficIn24h  uint64
+	TrafficOut24h uint64
 }
 
-func NewMonitorHandler(store *Store, auth *AuthService, enrollment EnrollmentService, reportEndpoint, enrollmentEndpoint string, now func() time.Time) *MonitorHandler {
+func NewMonitorHandler(store *Store, enrollment EnrollmentService, reportEndpoint, enrollmentEndpoint string, now func() time.Time) *MonitorHandler {
 	if now == nil {
 		now = time.Now
 	}
 	handler := &MonitorHandler{
 		store:              store,
-		guard:              RequestGuard{Auth: auth},
 		enrollment:         enrollment,
 		reportEndpoint:     reportEndpoint,
 		enrollmentEndpoint: enrollmentEndpoint,
 		now:                now,
-		templates:          template.Must(template.ParseFS(webAssets, "templates/*.html")),
-	}
-	handler.login = LoginHandler{
-		Auth:           auth,
-		IPLimiter:      NewSlidingWindowLimiter(5, 15*time.Minute, now),
-		AccountLimiter: NewSlidingWindowLimiter(5, 15*time.Minute, now),
+		templates: template.Must(template.New("web").Funcs(template.FuncMap{
+			"formatBytes": formatBytes,
+			"formatRate":  formatRate,
+		}).ParseFS(webAssets, "templates/*.html")),
 	}
 	return handler
+}
+
+func formatBytes(value uint64) string {
+	const base = 1024.0
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	number := float64(value)
+	unit := 0
+	for number >= base && unit < len(units)-1 {
+		number /= base
+		unit++
+	}
+	return fmt.Sprintf("%.2f %s", number, units[unit])
+}
+
+func formatRate(value float64) string {
+	if value < 0 {
+		value = 0
+	}
+	const base = 1024.0
+	units := []string{"B/s", "KB/s", "MB/s", "GB/s", "TB/s"}
+	unit := 0
+	for value >= base && unit < len(units)-1 {
+		value /= base
+		unit++
+	}
+	return fmt.Sprintf("%.2f %s", value, units[unit])
 }
 
 func (h *MonitorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -70,40 +89,23 @@ func (h *MonitorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveTrendScript(w)
 		return
 	}
-	if r.URL.Path == "/login" {
-		if r.Method == http.MethodGet {
-			h.render(w, http.StatusOK, "login.html", pageData{Title: "Sign in"})
-			return
-		}
-		h.login.HandleLogin(w, r)
-		return
-	}
-	if r.URL.Path == "/logout" {
-		h.guard.HandleLogout(w, r)
-		return
-	}
 	if r.URL.Path != "/" && r.URL.Path != "/nodes" && !strings.HasPrefix(r.URL.Path, "/nodes/") {
 		http.NotFound(w, r)
 		return
 	}
-	session, ok := h.guard.Session(r)
-	if !ok {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
 	switch {
 	case r.URL.Path == "/" && r.Method == http.MethodGet:
-		h.dashboard(w, r, session)
+		h.dashboard(w, r)
 	case r.URL.Path == "/nodes" && r.Method == http.MethodPost:
-		h.createNode(w, r, session)
+		h.createNode(w, r)
 	case strings.HasPrefix(r.URL.Path, "/nodes/"):
-		h.nodeRoute(w, r, session)
+		h.nodeRoute(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *MonitorHandler) dashboard(w http.ResponseWriter, r *http.Request, session Session) {
+func (h *MonitorHandler) dashboard(w http.ResponseWriter, r *http.Request) {
 	nodes, err := h.store.ListNodes(r.Context(), h.now().UTC())
 	if err != nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -121,16 +123,17 @@ func (h *MonitorHandler) dashboard(w http.ResponseWriter, r *http.Request, sessi
 		}
 		filtered = append(filtered, node)
 	}
-	h.render(w, http.StatusOK, "dashboard.html", pageData{Title: "Servers", CSRFToken: session.CSRFToken, Nodes: filtered, Query: query, StateFilter: state})
+	h.render(w, http.StatusOK, "dashboard.html", pageData{Title: "服务器", Nodes: filtered, Query: query, StateFilter: state})
 }
 
-func (h *MonitorHandler) createNode(w http.ResponseWriter, r *http.Request, session Session) {
-	if _, ok := h.guard.MutationSession(w, r); !ok {
+func (h *MonitorHandler) createNode(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	node, err := h.store.CreateNode(r.Context(), r.Form.Get("display_name"), h.now().UTC())
 	if err != nil {
-		h.render(w, http.StatusBadRequest, "dashboard.html", pageData{Title: "Servers", CSRFToken: session.CSRFToken, Error: "Unable to create server."})
+		h.render(w, http.StatusBadRequest, "dashboard.html", pageData{Title: "服务器", Error: "无法创建服务器。"})
 		return
 	}
 	code, err := h.enrollment.CreateEnrollmentCode(r.Context(), node.ID)
@@ -140,10 +143,10 @@ func (h *MonitorHandler) createNode(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	command := fmt.Sprintf("PROBE_NODE_ID=%s PROBE_ENDPOINT=%s PROBE_ENROLL_ENDPOINT=%s PROBE_ENROLL_CODE=%s /usr/local/bin/probe-agent", shellQuote(node.ID), shellQuote(h.reportEndpoint), shellQuote(h.enrollmentEndpoint), shellQuote(code))
-	h.render(w, http.StatusCreated, "enrollment.html", pageData{Title: "Enroll server", AgentCommand: command})
+	h.render(w, http.StatusCreated, "enrollment.html", pageData{Title: "注册服务器", AgentCommand: command})
 }
 
-func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request, session Session) {
+func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/nodes/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" || len(parts) > 2 {
@@ -156,14 +159,11 @@ func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request, sessi
 			http.NotFound(w, r)
 			return
 		}
-		h.nodeDetail(w, r, session, nodeID)
+		h.nodeDetail(w, r, nodeID)
 		return
 	}
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
-		return
-	}
-	if _, ok := h.guard.MutationSession(w, r); !ok {
 		return
 	}
 	var err error
@@ -187,7 +187,7 @@ func (h *MonitorHandler) nodeRoute(w http.ResponseWriter, r *http.Request, sessi
 	http.Redirect(w, r, "/nodes/"+nodeID, http.StatusSeeOther)
 }
 
-func (h *MonitorHandler) nodeDetail(w http.ResponseWriter, r *http.Request, session Session, nodeID string) {
+func (h *MonitorHandler) nodeDetail(w http.ResponseWriter, r *http.Request, nodeID string) {
 	node, err := h.store.Node(r.Context(), nodeID, h.now().UTC())
 	if err != nil {
 		http.NotFound(w, r)
@@ -198,7 +198,21 @@ func (h *MonitorHandler) nodeDetail(w http.ResponseWriter, r *http.Request, sess
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	h.render(w, http.StatusOK, "node.html", pageData{Title: node.DisplayName, CSRFToken: session.CSRFToken, Node: node, TrendJSON: trendJSON(samples)})
+	trafficIn, trafficOut := trafficUsage(samples)
+	h.render(w, http.StatusOK, "node.html", pageData{Title: node.DisplayName, Node: node, TrendJSON: trendJSON(samples), TrafficIn24h: trafficIn, TrafficOut24h: trafficOut})
+}
+
+func trafficUsage(samples []Sample) (uint64, uint64) {
+	var inbound, outbound float64
+	for index := 1; index < len(samples); index++ {
+		seconds := samples[index].ReceivedAt.Sub(samples[index-1].ReceivedAt).Seconds()
+		if seconds <= 0 {
+			continue
+		}
+		inbound += samples[index].IngressBytesPerSecond * seconds
+		outbound += samples[index].EgressBytesPerSecond * seconds
+	}
+	return uint64(inbound), uint64(outbound)
 }
 
 func (h *MonitorHandler) render(w http.ResponseWriter, status int, name string, data pageData) {

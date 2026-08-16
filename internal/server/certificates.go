@@ -174,6 +174,18 @@ func (s EnrollmentService) Enroll(ctx context.Context, code string, csrPEM []byt
 		return IssuedCertificate{}, fmt.Errorf("enrollment service is not configured")
 	}
 	now := s.now()
+	publicKeyDER, err := csrPublicKeyDER(csrPEM)
+	if err != nil {
+		return IssuedCertificate{}, err
+	}
+	if replay, err := s.Store.EnrollmentReplay(ctx, code, publicKeyDER); err == nil {
+		if _, err := s.Store.NodeForCertificate(ctx, replay.SerialNumber, now); err != nil {
+			return IssuedCertificate{}, err
+		}
+		return IssuedCertificate{CertificatePEM: replay.CertificatePEM, CAPEM: s.CA.CertificatePEM(), SerialNumber: replay.SerialNumber, NotAfter: replay.ExpiresAt}, nil
+	} else if !errors.Is(err, ErrEnrollmentReplayNotFound) {
+		return IssuedCertificate{}, err
+	}
 	// The code identifies the node only inside the transaction; issue first so the certificate never leaves the service unless it is persisted.
 	nodeID, err := s.Store.NodeForEnrollmentCode(ctx, code, now)
 	if err != nil {
@@ -183,10 +195,32 @@ func (s EnrollmentService) Enroll(ctx context.Context, code string, csrPEM []byt
 	if err != nil {
 		return IssuedCertificate{}, err
 	}
-	if _, err := s.Store.EnrollCertificate(ctx, code, issued.SerialNumber, now, issued.NotAfter); err != nil {
+	if _, err := s.Store.EnrollCertificate(ctx, code, issued.SerialNumber, issued.CertificatePEM, publicKeyDER, now, issued.NotAfter); err != nil {
+		if replay, replayErr := s.Store.EnrollmentReplay(ctx, code, publicKeyDER); replayErr == nil {
+			return IssuedCertificate{CertificatePEM: replay.CertificatePEM, CAPEM: s.CA.CertificatePEM(), SerialNumber: replay.SerialNumber, NotAfter: replay.ExpiresAt}, nil
+		}
 		return IssuedCertificate{}, err
 	}
 	return issued, nil
+}
+
+func csrPublicKeyDER(csrPEM []byte) ([]byte, error) {
+	block, rest := pem.Decode(csrPEM)
+	if block == nil || (block.Type != "CERTIFICATE REQUEST" && block.Type != "NEW CERTIFICATE REQUEST") || len(strings.TrimSpace(string(rest))) != 0 {
+		return nil, fmt.Errorf("invalid certificate request PEM")
+	}
+	request, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate request: %w", err)
+	}
+	if err := request.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("verify certificate request: %w", err)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(request.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshal certificate request public key: %w", err)
+	}
+	return publicKeyDER, nil
 }
 
 func (s EnrollmentService) now() time.Time {

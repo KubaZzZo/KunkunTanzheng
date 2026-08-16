@@ -8,7 +8,7 @@ This is a development checkpoint, not a production release. The MVP is implement
 
 - Support at most 50 Linux amd64 or arm64 nodes.
 - The Agent only samples Linux `/proc` and the root filesystem, then makes outbound HTTPS connections. It never opens an inbound listener.
-- The product provides one administrator, node enrollment, monitoring views, certificate renewal, disablement, and removal.
+- The product provides public monitoring views, node enrollment, certificate renewal, disablement, and removal. Access control for the monitor hostname is supplied by the deployment perimeter (for example Cloudflare Access), not by the application.
 - Do not add remote shell, command execution, file transfer, process inspection, log collection, port scanning, public status pages, multi-user roles, external alert channels, or cloud-managed dependencies to this MVP.
 
 ## Security Invariants
@@ -17,9 +17,9 @@ This is a development checkpoint, not a production release. The MVP is implement
 - Caddy only accepts the defined hostname, method, and path combinations. It is responsible for public TLS; the Agent uses mTLS for enrollment, reporting, and renewal.
 - Agent private keys, Agent CA private material, application authentication material, SQLite data, and the public CA certificate use separate persistent storage. Caddy receives only the public CA certificate as a read-only mount.
 - The server runs as a non-root user with a read-only root filesystem except for declared writable directories.
-- Do not log enrollment codes, private keys, session cookies, TOTP secrets, recovery codes, or complete authorization headers.
-- Administrator access requires Argon2id password verification, TOTP or a one-time recovery code, server-side 12-hour sessions, same-origin validation, and CSRF validation for state changes.
-- Registration and failed administrator login attempts are rate-limited by source IP. Agent reports are bounded to 8 KiB and limited per node.
+- Do not log enrollment codes, private keys, or complete authorization headers.
+- The monitor hostname must be protected by an external access perimeter because the application has no login or CSRF layer.
+- Registration is rate-limited by source IP. Agent reports are bounded to 8 KiB and limited per node.
 
 ## Data and Operational Constraints
 

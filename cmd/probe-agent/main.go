@@ -146,9 +146,13 @@ func deriveRenewalEndpoint(reportEndpoint string) (string, error) {
 func ensureCredentials(ctx context.Context, config config) error {
 	paths := []string{config.CertFile, config.KeyFile, config.CAFile}
 	existing := 0
+	keyExists := false
 	for _, path := range paths {
 		if _, err := os.Stat(path); err == nil {
 			existing++
+			if path == config.KeyFile {
+				keyExists = true
+			}
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("inspect agent credential: %w", err)
 		}
@@ -156,7 +160,7 @@ func ensureCredentials(ctx context.Context, config config) error {
 	if existing == len(paths) {
 		return nil
 	}
-	if existing != 0 {
+	if existing != 0 && !(existing == 1 && keyExists) {
 		return fmt.Errorf("agent credentials are incomplete; remove them before registering again")
 	}
 	if config.EnrollCode == "" || config.EnrollEndpoint == "" {

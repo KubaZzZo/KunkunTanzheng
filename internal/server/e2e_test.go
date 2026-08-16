@@ -22,27 +22,12 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	store := openTestStore(t)
-	auth, err := NewAuthService(store, strings.Repeat("e", 32), func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("NewAuthService() error = %v", err)
-	}
-	secret, err := GenerateTOTPSecret()
-	if err != nil {
-		t.Fatalf("GenerateTOTPSecret() error = %v", err)
-	}
-	if _, err := auth.Bootstrap(ctx, "password", secret, TOTPCode(secret, now)); err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
-	}
-	session, err := auth.Authenticate(ctx, "password", TOTPCode(secret, now))
-	if err != nil {
-		t.Fatalf("Authenticate() error = %v", err)
-	}
 	ca, err := LoadOrCreateCertificateAuthority(t.TempDir())
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificateAuthority() error = %v", err)
 	}
 	enrollment := EnrollmentService{Store: store, CA: ca, Now: func() time.Time { return now }}
-	monitor := NewMonitorHandler(store, auth, enrollment, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
+	monitor := NewMonitorHandler(store, enrollment, "https://ingest.example.test/v1/reports", "https://enroll.example.test/v1/enroll", func() time.Time { return now })
 	ingest := IngestService{Store: store, CA: ca, Now: func() time.Time { return now }, ReportLimiter: NewSlidingWindowLimiter(4, time.Minute, func() time.Time { return now })}
 	application := NewApplication(
 		ApplicationConfig{MonitorHost: "monitor.example.test", IngestHost: "ingest.example.test", EnrollHost: "enroll.example.test"},
@@ -50,7 +35,6 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 		ingest,
 		EnrollmentHandler{Service: enrollment, Limiter: NewSlidingWindowLimiter(5, 15*time.Minute, func() time.Time { return now })},
 		CertificateRenewalHandler{Ingest: ingest, CA: ca},
-		nil,
 	)
 
 	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +54,7 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 	monitorClient := *testServer.Client()
 	monitorClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	create := newEndToEndRequest(http.MethodPost, testServer.URL+"/nodes", url.Values{"display_name": {"edge-01"}, "csrf": {session.CSRFToken}}.Encode(), session)
+	create := newEndToEndRequest(http.MethodPost, testServer.URL+"/nodes", url.Values{"display_name": {"edge-01"}}.Encode())
 	created, err := testServer.Client().Do(create)
 	if err != nil {
 		t.Fatalf("create node request: %v", err)
@@ -102,7 +86,7 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 		t.Fatalf("Send() error = %v", err)
 	}
 
-	dashboard := newEndToEndRequest(http.MethodGet, testServer.URL+"/?state=online", "", session)
+	dashboard := newEndToEndRequest(http.MethodGet, testServer.URL+"/?state=online", "")
 	dashboardResponse, err := testServer.Client().Do(dashboard)
 	if err != nil {
 		t.Fatalf("dashboard request: %v", err)
@@ -112,7 +96,7 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 		t.Fatalf("dashboard status/body = %d/%q", dashboardResponse.StatusCode, dashboardBody)
 	}
 
-	disable := newEndToEndRequest(http.MethodPost, testServer.URL+"/nodes/"+node.ID+"/disable", "csrf="+url.QueryEscape(session.CSRFToken), session)
+	disable := newEndToEndRequest(http.MethodPost, testServer.URL+"/nodes/"+node.ID+"/disable", "")
 	disableResponse, err := monitorClient.Do(disable)
 	if err != nil {
 		t.Fatalf("disable request: %v", err)
@@ -126,15 +110,13 @@ func TestEndToEndEnrollmentReportingAndRevocation(t *testing.T) {
 	}
 }
 
-func newEndToEndRequest(method, target, body string, session Session) *http.Request {
+func newEndToEndRequest(method, target, body string) *http.Request {
 	request, err := http.NewRequest(method, target, strings.NewReader(body))
 	if err != nil {
 		panic(err)
 	}
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: session.Token})
 	if method == http.MethodPost {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		request.Header.Set("Origin", "https://monitor.example.test")
 	}
 	return request
 }

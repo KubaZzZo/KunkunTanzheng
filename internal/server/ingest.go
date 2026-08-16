@@ -7,15 +7,20 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kunkuntanzheng/server-probe/internal/probe"
 )
 
-const clientCertificateHeader = "X-Probe-Client-Certificate"
+const (
+	clientCertificateHeader      = "X-Probe-Client-Certificate"
+	clientCertificateSerialQuery = "probe_cert_serial"
+)
 
 type IngestService struct {
 	Store         *Store
@@ -83,12 +88,43 @@ func (s IngestService) HandleReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s IngestService) nodeForRequest(r *http.Request, now time.Time) (string, error) {
+	nodeID, _, err := s.clientIdentity(r, now)
+	return nodeID, err
+}
+
+func (s IngestService) clientIdentity(r *http.Request, now time.Time) (string, string, error) {
 	if s.Store == nil || s.CA == nil {
-		return "", fmt.Errorf("ingest service is not configured")
+		return "", "", fmt.Errorf("ingest service is not configured")
 	}
 	certificate, intermediates, err := requestClientCertificate(r)
 	if err != nil {
-		return "", err
+		serialNumber := normalizeCertificateSerial(r.URL.Query().Get(clientCertificateSerialQuery))
+		if serialNumber == "" {
+			return "", "", err
+		}
+		nodeID, lookupErr := s.Store.NodeForCertificate(r.Context(), serialNumber, now)
+		if lookupErr != nil {
+			return "", "", lookupErr
+		}
+		return nodeID, serialNumber, nil
+	}
+	return s.nodeIdentityFromCertificate(r, now, certificate, intermediates)
+}
+
+func normalizeCertificateSerial(raw string) string {
+	serial := strings.TrimSpace(raw)
+	if serial == "" {
+		return ""
+	}
+	if decimal, ok := new(big.Int).SetString(serial, 10); ok {
+		return decimal.Text(16)
+	}
+	return serial
+}
+
+func (s IngestService) nodeIdentityFromCertificate(r *http.Request, now time.Time, certificate *x509.Certificate, intermediates *x509.CertPool) (string, string, error) {
+	if certificate == nil {
+		return "", "", fmt.Errorf("client certificate is missing")
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(s.CA.Certificate())
@@ -98,16 +134,17 @@ func (s IngestService) nodeForRequest(r *http.Request, now time.Time) (string, e
 		CurrentTime:   now,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
-		return "", fmt.Errorf("verify client certificate: %w", err)
+		return "", "", fmt.Errorf("verify client certificate: %w", err)
 	}
-	nodeID, err := s.Store.NodeForCertificate(r.Context(), certificate.SerialNumber.Text(16), now)
+	serialNumber := certificate.SerialNumber.Text(16)
+	nodeID, err := s.Store.NodeForCertificate(r.Context(), serialNumber, now)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if certificate.Subject.CommonName != nodeID {
-		return "", fmt.Errorf("certificate subject does not match node")
+		return "", "", fmt.Errorf("certificate subject does not match node")
 	}
-	return nodeID, nil
+	return nodeID, serialNumber, nil
 }
 
 func requestClientCertificate(r *http.Request) (*x509.Certificate, *x509.CertPool, error) {
@@ -153,6 +190,8 @@ type SlidingWindowLimiter struct {
 	events map[string][]time.Time
 }
 
+const maxSlidingWindowKeys = 4096
+
 func NewSlidingWindowLimiter(limit int, window time.Duration, now func() time.Time) *SlidingWindowLimiter {
 	if now == nil {
 		now = time.Now
@@ -167,6 +206,10 @@ func (l *SlidingWindowLimiter) Allow(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now().UTC()
+	l.pruneExpiredLocked(now)
+	if _, exists := l.events[key]; !exists && len(l.events) >= maxSlidingWindowKeys {
+		l.evictOldestLocked()
+	}
 	events := l.recentEventsLocked(key, now)
 	if len(events) >= l.limit {
 		l.events[key] = events
@@ -184,6 +227,7 @@ func (l *SlidingWindowLimiter) Check(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now().UTC()
+	l.pruneExpiredLocked(now)
 	events := l.recentEventsLocked(key, now)
 	if len(events) >= l.limit {
 		l.events[key] = events
@@ -200,5 +244,43 @@ func (l *SlidingWindowLimiter) recentEventsLocked(key string, now time.Time) []t
 	for first < len(events) && !events[first].After(cutoff) {
 		first++
 	}
-	return events[first:]
+	if first == len(events) {
+		delete(l.events, key)
+		return nil
+	}
+	events = events[first:]
+	l.events[key] = events
+	return events
+}
+
+func (l *SlidingWindowLimiter) pruneExpiredLocked(now time.Time) {
+	cutoff := now.Add(-l.window)
+	for key, events := range l.events {
+		first := 0
+		for first < len(events) && !events[first].After(cutoff) {
+			first++
+		}
+		if first == len(events) {
+			delete(l.events, key)
+			continue
+		}
+		l.events[key] = events[first:]
+	}
+}
+
+func (l *SlidingWindowLimiter) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for key, events := range l.events {
+		if len(events) == 0 {
+			delete(l.events, key)
+			continue
+		}
+		if oldestKey == "" || events[0].Before(oldest) {
+			oldestKey, oldest = key, events[0]
+		}
+	}
+	if oldestKey != "" {
+		delete(l.events, oldestKey)
+	}
 }

@@ -48,9 +48,13 @@ func TestEnrollmentClientWritesVerifiedCredentials(t *testing.T) {
 	defer serverHTTP.Close()
 
 	directory := filepath.Join(t.TempDir(), "credentials")
-	client := EnrollmentClient{Client: serverHTTP.Client(), Endpoint: serverHTTP.URL}
+	clientHTTP := &http.Client{Transport: &dropFirstResponseTransport{handler: serverHTTP.Config.Handler}}
+	client := EnrollmentClient{Client: clientHTTP, Endpoint: serverHTTP.URL}
+	if err := client.Enroll(ctx, code, filepath.Join(directory, "client.crt"), filepath.Join(directory, "client.key"), filepath.Join(directory, "ca.crt")); err == nil {
+		t.Fatal("first Enroll() unexpectedly succeeded after simulated response loss")
+	}
 	if err := client.Enroll(ctx, code, filepath.Join(directory, "client.crt"), filepath.Join(directory, "client.key"), filepath.Join(directory, "ca.crt")); err != nil {
-		t.Fatalf("Enroll() error = %v", err)
+		t.Fatalf("retry Enroll() error = %v", err)
 	}
 	for _, name := range []string{"client.crt", "client.key", "ca.crt"} {
 		contents, err := os.ReadFile(filepath.Join(directory, name))
@@ -206,3 +210,18 @@ func renewalCredential(t *testing.T) ([]byte, []byte, []byte) {
 type roundTripper func(*http.Request) (*http.Response, error)
 
 func (fn roundTripper) RoundTrip(request *http.Request) (*http.Response, error) { return fn(request) }
+
+type dropFirstResponseTransport struct {
+	handler http.Handler
+	dropped bool
+}
+
+func (t *dropFirstResponseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	t.handler.ServeHTTP(recorder, request)
+	if !t.dropped {
+		t.dropped = true
+		return nil, errors.New("simulated response loss")
+	}
+	return recorder.Result(), nil
+}
